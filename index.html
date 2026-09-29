@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Neon Pong — Multiplayer</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+:root{--bg:#070a12;--panel:#0d1322;--line:#24304a;--text:#f4f7ff;--muted:#9aa7c2;--accent:#62e6ff;--accent2:#b36cff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -10%,#17213a 0,#070a12 45%);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;display:flex;align-items:center;justify-content:center;padding:20px}
+.wrap{width:min(1050px,100%)}header{text-align:center;margin-bottom:18px}h1{margin:0;font-size:clamp(30px,6vw,54px);letter-spacing:-2px}header p{color:var(--muted);margin:8px 0 0}
+.card{background:rgba(13,19,34,.88);border:1px solid var(--line);border-radius:22px;padding:20px;box-shadow:0 20px 70px rgba(0,0,0,.35)}
+.lobby{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{border:1px solid var(--line);border-radius:16px;padding:18px;background:#0a0f1c}.panel h2{margin:0 0 8px;font-size:19px}.panel p{color:var(--muted);font-size:14px;line-height:1.5}
+button,input{width:100%;border-radius:12px;padding:13px 14px;font:inherit}button{border:0;background:linear-gradient(135deg,var(--accent),#7b8cff);color:#06101a;font-weight:800;cursor:pointer}button.secondary{background:#172138;color:var(--text);border:1px solid #2a3959}button:disabled{opacity:.45;cursor:not-allowed}input{background:#070b14;border:1px solid #2b3853;color:var(--text);outline:none;margin:7px 0 10px;text-transform:uppercase;letter-spacing:2px}
+.status{margin-top:15px;text-align:center;color:var(--muted);min-height:22px}.room{display:none;text-align:center}.room strong{color:var(--accent);font-size:25px;letter-spacing:3px}.game{display:none}.topbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}.score{font-size:22px;font-weight:800}.badge{font-size:12px;color:var(--muted);border:1px solid var(--line);padding:7px 10px;border-radius:999px}
+canvas{width:100%;display:block;background:#050811;border:1px solid #26324b;border-radius:16px;touch-action:none}
+.help{text-align:center;color:var(--muted);font-size:13px;margin-top:10px}.hidden{display:none!important}
+@media(max-width:700px){.lobby{grid-template-columns:1fr}.card{padding:14px}body{padding:10px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1>NEON PONG</h1><p>Two players. Two devices. One live match.</p></header>
+<div class="card">
+<section id="lobby" class="lobby">
+<div class="panel"><h2>Create a room</h2><p>Player 1 hosts the match. Share the 6-character room code with Player 2.</p><button id="hostBtn">Create Room</button></div>
+<div class="panel"><h2>Join a room</h2><p>Enter the room code from the other player, then tap Join.</p><input id="roomInput" maxlength="6" placeholder="ROOM CODE"><button id="joinBtn">Join Room</button></div>
+</section>
+<div id="roomInfo" class="room"><p>Share this room code with your opponent:</p><strong id="roomCode">------</strong></div>
+<div id="status" class="status">Choose Create Room or Join Room.</div>
+<section id="game" class="game">
+<div class="topbar"><div class="score" id="score">0 — 0</div><div class="badge" id="role">PLAYER</div><button class="secondary" id="leaveBtn" style="width:auto;padding:8px 12px">Leave</button></div>
+<canvas id="board" width="900" height="520"></canvas>
+<div class="help">Move your paddle with <b>W/S</b> or <b>↑/↓</b>. On touch devices, drag your paddle. First to <b>7</b> wins.</div>
+</section>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const canvas=$('board'),ctx=canvas.getContext('2d');
+const W=900,H=520,PW=16,PH=105,BALL=10;
+let peer=null,conn=null,host=false,player=0,room='',running=false,last=performance.now(),keys={},touchY=null;
+let state={p:[H/2-PH/2,H/2-PH/2],ball:{x:W/2,y:H/2,vx:6,vy:3},score:[0,0],winner:null};
+function setStatus(t){$('status').textContent=t}
+function code(){return Math.random().toString(36).slice(2,8).toUpperCase()}
+function resetBall(dir){state.ball={x:W/2,y:H/2,vx:dir*6,vy:(Math.random()>.5?1:-1)*3}}
+function startGame(role){
+ $('lobby').classList.add('hidden');$('roomInfo').style.display='none';$('game').style.display='block';
+ $('role').textContent=role; running=true; last=performance.now(); requestAnimationFrame(loop); render();
+}
+function hostRoom(){
+ if(peer)return; host=true; player=0; room=code();
+ peer=new Peer('neonpong-'+room,{debug:0});
+ peer.on('open',()=>{$('roomCode').textContent=room;$('roomInfo').style.display='block';setStatus('Waiting for Player 2 to join…')});
+ peer.on('connection',c=>{if(conn)return;c.on('open',()=>{conn=c; conn.on('data',onData); conn.on('close',()=>{running=false;setStatus('Opponent disconnected. Create a new room to play again.');$('game').style.display='none';$('roomInfo').style.display='block'}) ; startGame('PLAYER 1 • HOST');send();});});
+ peer.on('error',e=>setStatus('Connection error: '+e.type));
+}
+function joinRoom(){
+ if(peer)return; room=$('roomInput').value.trim().toUpperCase(); if(room.length!==6)return setStatus('Enter the 6-character room code.');
+ player=1;host=false; peer=new Peer({debug:0});
+ peer.on('open',()=>{conn=peer.connect('neonpong-'+room,{reliable:true}); conn.on('open',()=>{conn.on('data',onData);startGame('PLAYER 2');setStatus('Connected. Game is live.');conn.send({type:'hello'})});conn.on('close',()=>{running=false;setStatus('Opponent disconnected.');$('game').style.display='none'})});
+ peer.on('error',e=>setStatus(e.type==='peer-unavailable'?'Room not found. Check the code.':'Connection error: '+e.type));
+}
+function onData(m){
+ if(!host && m.type==='state'){state=m.state; if(state.winner!==null){running=false;setStatus(state.winner===player?'You win!':'You lose!')} render()}
+ if(host && m.type==='input'){state.p[1]=clamp(m.y,0,H-PH)}
+ if(!host && m.type==='restart'){state=JSON.parse(JSON.stringify(m.state));running=true}
+}
+function send(){if(conn&&conn.open)conn.send({type:'state',state})}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function moveLocal(dt){
+ if(touchY!==null){state.p[player]=clamp(touchY-PH/2,0,H-PH);return}
+ let d=(keys['ArrowDown']||keys['s']?1:0)-(keys['ArrowUp']||keys['w']?1:0);
+ state.p[player]=clamp(state.p[player]+d*470*dt,0,H-PH);
+}
+function physics(dt){
+ const b=state.ball;b.x+=b.vx*dt*60;b.y+=b.vy*dt*60;
+ if(b.y-BALL<0){b.y=BALL;b.vy=Math.abs(b.vy)} if(b.y+BALL>H){b.y=H-BALL;b.vy=-Math.abs(b.vy)}
+ if(b.x-BALL<PW+20 && b.x>20 && b.y>state.p[0]&&b.y<state.p[0]+PH&&b.vx<0){b.x=PW+20+BALL;b.vx=Math.abs(b.vx)*1.03;b.vy+=((b.y-(state.p[0]+PH/2))/(PH/2))*1.7}
+ if(b.x+BALL>W-PW-20 && b.x<W-20 && b.y>state.p[1]&&b.y<state.p[1]+PH&&b.vx>0){b.x=W-PW-20-BALL;b.vx=-Math.abs(b.vx)*1.03;b.vy+=((b.y-(state.p[1]+PH/2))/(PH/2))*1.7}
+ if(b.x<-30){state.score[1]++;point(1)} if(b.x>W+30){state.score[0]++;point(0)}
+}
+function point(who){
+ if(state.score[who]>=7){state.winner=who;running=false}
+ else resetBall(who===0?1:-1);
+}
+function loop(t){
+ const dt=Math.min(.033,(t-last)/1000);last=t;
+ if(running){
+   moveLocal(dt);
+   if(host){physics(dt);send()} else if(conn&&conn.open)conn.send({type:'input',y:state.p[1]});
+   render();
+ }
+ requestAnimationFrame(loop)
+}
+function render(){
+ ctx.clearRect(0,0,W,H);
+ ctx.fillStyle='#07101d';ctx.fillRect(0,0,W,H);
+ ctx.strokeStyle='#1d2940';ctx.setLineDash([10,12]);ctx.beginPath();ctx.moveTo(W/2,0);ctx.lineTo(W/2,H);ctx.stroke();ctx.setLineDash([]);
+ drawPaddle(20,state.p[0]);drawPaddle(W-20-PW,state.p[1]);
+ ctx.beginPath();ctx.arc(state.ball.x,state.ball.y,BALL,0,Math.PI*2);ctx.fillStyle='#62e6ff';ctx.shadowColor='#62e6ff';ctx.shadowBlur=22;ctx.fill();ctx.shadowBlur=0;
+ $('score').textContent=state.score[0]+' — '+state.score[1];
+}
+function drawPaddle(x,y){ctx.fillStyle='#b36cff';ctx.shadowColor='#b36cff';ctx.shadowBlur=18;ctx.fillRect(x,y,PW,PH);ctx.shadowBlur=0}
+addEventListener('keydown',e=>{keys[e.key]=true;if(['ArrowUp','ArrowDown',' '].includes(e.key))e.preventDefault()});
+addEventListener('keyup',e=>keys[e.key]=false);
+canvas.addEventListener('pointerdown',e=>{canvas.setPointerCapture(e.pointerId);touchY=pointerY(e)});
+canvas.addEventListener('pointermove',e=>{if(e.buttons)touchY=pointerY(e)});
+canvas.addEventListener('pointerup',()=>touchY=null);
+function pointerY(e){const r=canvas.getBoundingClientRect();return (e.clientY-r.top)*H/r.height}
+$('hostBtn').onclick=hostRoom;$('joinBtn').onclick=joinRoom;
+$('roomInput').addEventListener('input',e=>e.target.value=e.target.value.replace(/[^a-z0-9]/gi,'').toUpperCase());
+$('leaveBtn').onclick=()=>location.reload();
+render();
+</script>
+</body>
+</html>
